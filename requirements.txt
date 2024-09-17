@@ -1,5 +1,5 @@
 requests
 PySocks>=1.7.1
-aiohttp
+aiohttp==3.8.1
 aiofiles
 urllib3
