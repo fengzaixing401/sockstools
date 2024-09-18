@@ -14,6 +14,10 @@ import aiohttp
 import asyncio
 from typing import List
 import aiofiles
+import sys
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -157,7 +161,8 @@ class ProxyPool:
     async def add_proxies(self, new_proxies: List[str]):
         self.proxies.extend([proxy for proxy in new_proxies if proxy not in self.proxies])
         await self.save_to_file()
-        log(f"添加了 {len(new_proxies)} 个新代理。总代理数: {len(self.proxies)}")
+        log(f"Added {len(new_proxies)} new proxies. Total proxies: {len(self.proxies)}")
+        return new_proxies[-1] if new_proxies else None  # 返回最新添加的代理
 
     async def get_proxy(self) -> str:
         if not self.proxies:
@@ -171,17 +176,25 @@ class ProxyPool:
     async def save_to_file(self):
         async with aiofiles.open(self.file_path, 'w') as f:
             await f.write(json.dumps(self.proxies, indent=2))
-        log(f"保存了 {len(self.proxies)} 个代理到 {self.file_path}")
+        log(f"Saved {len(self.proxies)} proxies to {self.file_path}")
 
-    async def load_from_file(self):
+    async def load_from_file(self, file_path=None):
         try:
-            async with aiofiles.open(self.file_path, 'r') as f:
+            path = file_path or self.file_path
+            async with aiofiles.open(path, 'r') as f:
                 content = await f.read()
                 self.proxies = json.loads(content) if content.strip() else []
-            log(f"从 {self.file_path} 加载了 {len(self.proxies)} 个代理")
+            log(f"Loaded {len(self.proxies)} proxies from {path}")
+            return self.proxies
         except (FileNotFoundError, json.JSONDecodeError):
             self.proxies = []
-            log(f"从 {self.file_path} 加载代理时出错。使用空代理列表。")
+            log(f"Error loading proxies from {path}. Starting with empty proxy list.")
+            return []
+
+    async def get_latest_proxy(self) -> str:
+        if not self.proxies:
+            await self.load_from_file()
+        return self.proxies[-1] if self.proxies else None
 
     async def clean_proxies(self):
         valid_proxies = []
@@ -230,8 +243,8 @@ async def get_proxies_from_url(url):
                 log(f"发生错误: {str(e)} (尝试 {attempt + 1}/3)")
             if attempt < 2:
                 await asyncio.sleep(2)
-    log("未能获取到有效的代理地址")
-    return []
+        log("未能获取到有效的代理地址")
+        return []
 
 def parse_proxy_string(proxy_string):
     if '://' not in proxy_string:
@@ -239,51 +252,48 @@ def parse_proxy_string(proxy_string):
     parts = proxy_string.split('://')
     proxy_type = parts[0].lower()
     if proxy_type in ['http', 'https']:
-        return {'http': proxy_string, 'https': proxy_string}
+        return proxy_string
     elif proxy_type in ['socks4', 'socks5', 'socks']:
-        proxy_type = socks.SOCKS4 if proxy_type == 'socks4' else socks.SOCKS5
-        addr, port = parts[1].split(':')
-        return {'proxy_type': proxy_type, 'addr': addr, 'port': int(port)}
+        return proxy_string if proxy_type != 'socks' else 'socks5://' + parts[1]
     return None
 
 def get_upstream_proxy(args):
-    if args.upstream:
-        return args.upstream
-    elif args.upstream_file:
-        asyncio.run(proxy_pool.load_from_file())
-    elif args.upstream_url:
+    if args.proxy_method == 'url':
         proxies = asyncio.run(get_proxies_from_url(args.upstream_url))
-        if proxies:
-            return random.choice(proxies)
-    proxy = asyncio.run(proxy_pool.get_proxy())
-    if proxy:
-        return proxy
+        return random.choice(proxies) if proxies else None
+    elif args.proxy_method == 'file':
+        proxies = asyncio.run(proxy_pool.load_from_file(args.upstream_file))
+        return random.choice(proxies) if proxies else None
+    elif args.proxy_method == 'manual':
+        return args.upstream
     log("No valid upstream proxy found. Running in direct mode.")
     return None
 
-def log(message):
-    print(message)
-    if hasattr(log, 'callback'):
-        log.callback(message)
+def log(message, level=logging.INFO):
+    logging.log(level, message)
 
 def create_server(args):
-    upstream_proxy = get_upstream_proxy(args)
+    try:
+        upstream_proxy = get_upstream_proxy(args)
 
-    if args.type == 'http':
-        server = ThreadingHTTPServer(('0.0.0.0', args.port), ProxyHandler)
-        server.upstream_proxy = upstream_proxy
-        ProxyHandler.upstream_proxy = upstream_proxy
-        log(f"Starting HTTP proxy on 0.0.0.0:{args.port}")
-    else:  # socks5
-        server = SocksProxy('0.0.0.0', args.port, upstream_proxy)
-        log(f"Starting SOCKS5 proxy on 0.0.0.0:{args.port}")
+        if args.type == 'http':
+            server = ThreadingHTTPServer(('0.0.0.0', args.port), ProxyHandler)
+            server.upstream_proxy = upstream_proxy
+            ProxyHandler.upstream_proxy = upstream_proxy
+            log(f"Starting HTTP proxy on 0.0.0.0:{args.port}")
+        else:  # socks5
+            server = SocksProxy('0.0.0.0', args.port, upstream_proxy)
+            log(f"Starting SOCKS5 proxy on 0.0.0.0:{args.port}")
 
-    if upstream_proxy:
-        log(f"Using upstream proxy: {upstream_proxy}")
-    else:
-        log("No valid upstream proxy found. Running in direct mode.")
+        if upstream_proxy:
+            log(f"Using upstream proxy: {upstream_proxy}")
+        else:
+            log("No valid upstream proxy found. Running in direct mode.")
 
-    return server
+        return server
+    except Exception as e:
+        log(f"Error creating server: {str(e)}")
+        raise
 
 def main(args=None):
     if args is None:
