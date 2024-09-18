@@ -36,10 +36,9 @@ class ProxyGUI:
         self.log_queue = queue.Queue()
         self.after_id = None
         self.proxy_pool = ProxyPool()
+        self.load_proxies_from_file()
 
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.ensure_proxy_file_exists()
-        self.load_proxies_from_file()  # 新增：初始化时加载代理
         atexit.register(self.cleanup)
 
     def create_settings(self, parent):
@@ -170,12 +169,12 @@ class ProxyGUI:
             if new_proxies:
                 asyncio.run(self.proxy_pool.add_proxies(new_proxies))
                 self.queue_log_message(f"成功获取并添加 {len(new_proxies)} 个新代理到代理池", "INFO")
-                self.save_proxies_to_file()  # 新增：保存到文件
+                self.save_proxies_to_file()
                 valid_proxy = asyncio.run(self.proxy_pool.get_proxy())
                 if valid_proxy:
                     new_proxy = parse_proxy_string(valid_proxy)
                     self.update_proxy(new_proxy)
-                    self.queue_log_message(f"成功获取新的有效代理: {valid_proxy}", "INFO")
+                    self.queue_log_message("成功获取新的有效代理", "INFO")
                     self.master.after(0, self.update_proxy_count)
                 else:
                     self.queue_log_message("无法获取有效的新代理", "WARNING")
@@ -203,7 +202,7 @@ class ProxyGUI:
         else:
             self.current_proxy_var.set(str(new_proxy))
         
-        self.queue_log_message(f"更新上游代理: {new_proxy}", "INFO")
+        self.queue_log_message(f"更新上游代理", "INFO")
 
     def update_proxy_count(self):
         count = len(self.proxy_pool.proxies)
@@ -245,31 +244,11 @@ class ProxyGUI:
     def log_levels(self):
         return ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
-    def ensure_proxy_file_exists(self):
-        proxy_file = 'proxies.json'
-        if not os.path.exists(proxy_file):
-            with open(proxy_file, 'w') as f:
-                json.dump([], f)
-            self.queue_log_message(f"创建了新的代理文件: {proxy_file}", "INFO")
-        else:
-            self.queue_log_message(f"找到现有的代理文件: {proxy_file}", "INFO")
-
-    def load_proxies_from_file(self):
-        proxy_file = 'proxies.json'
-        try:
-            with open(proxy_file, 'r') as f:
-                loaded_proxies = json.load(f)
-            self.proxy_pool.proxies = loaded_proxies
-            self.update_proxy_count()
-            self.queue_log_message(f"从文件加载了 {len(loaded_proxies)} 个代理", "INFO")
-        except Exception as e:
-            self.queue_log_message(f"加载代理文件时发生错误: {str(e)}", "ERROR")
-
     def save_proxies_to_file(self):
         proxy_file = 'proxies.json'
         try:
             with open(proxy_file, 'w') as f:
-                json.dump(self.proxy_pool.proxies, f, indent=2)
+                json.dump({"proxies": self.proxy_pool.proxies}, f, indent=2)
             self.queue_log_message(f"成功保存 {len(self.proxy_pool.proxies)} 个代理到文件", "INFO")
         except Exception as e:
             self.queue_log_message(f"保存代理到文件时发生错误: {str(e)}", "ERROR")
@@ -357,7 +336,18 @@ class ProxyGUI:
                 upstream_url=self.upstream_url_var.get()
             )
 
-            self.stop_event.clear()  # 重置停止事件
+            self.stop_event.clear()
+            
+            self.queue_log_message("正在获取初始代理...", "INFO")
+            initial_proxy = self.get_initial_proxy(args.upstream_url)
+            if initial_proxy:
+                args.upstream = initial_proxy
+                self.queue_log_message(f"使用初始代理: {initial_proxy}", "INFO")
+                self.update_proxy(initial_proxy)
+                self.update_proxy_count()
+            else:
+                self.queue_log_message("无法获取初始代理，将使用默认设置", "WARNING")
+
             self.proxy_thread = threading.Thread(target=self._run_proxy, args=(args,), daemon=True)
             self.proxy_thread.start()
 
@@ -368,6 +358,20 @@ class ProxyGUI:
         except ValueError as e:
             self.queue_log_message(f"启动失败: {str(e)}", "ERROR")
 
+    def get_initial_proxy(self, upstream_url):
+        if self.proxy_pool.proxies:
+            return random.choice(self.proxy_pool.proxies)
+        
+        try:
+            new_proxies = asyncio.run(get_proxies_from_url(upstream_url))
+            if new_proxies:
+                asyncio.run(self.proxy_pool.add_proxies(new_proxies))
+                self.save_proxies_to_file()
+                return asyncio.run(self.proxy_pool.get_proxy())
+        except Exception as e:
+            self.queue_log_message(f"获取初始代理时发生错误: {str(e)}", "ERROR")
+        return None
+
     def stop_proxy(self):
         if not self.is_running:
             self.queue_log_message("代理服务器未在运行", "WARNING")
@@ -377,24 +381,26 @@ class ProxyGUI:
         self.stop_event.set()
 
         def shutdown_server():
-            if self.proxy_server:
-                if isinstance(self.proxy_server, ThreadingHTTPServer):
-                    self.proxy_server.shutdown()
-                    self.proxy_server.server_close()
-                elif isinstance(self.proxy_server, SocksProxy):
-                    self.proxy_server.stop()
+            try:
+                if self.proxy_server:
+                    if isinstance(self.proxy_server, ThreadingHTTPServer):
+                        self.proxy_server.shutdown()
+                        self.proxy_server.server_close()
+                    elif isinstance(self.proxy_server, SocksProxy):
+                        self.proxy_server.stop()
+                self.queue_log_message("代理服务器已成功停止", "INFO")
+            except Exception as e:
+                self.queue_log_message(f"停止代理服务器时发生错误: {str(e)}", "ERROR")
 
         shutdown_thread = threading.Thread(target=shutdown_server)
         shutdown_thread.start()
 
-        # 等待关闭线程最多 5 秒
-        shutdown_thread.join(timeout=5)
+        # 等待关闭线程最多 10 秒
+        shutdown_thread.join(timeout=10)
 
         if shutdown_thread.is_alive():
             self.queue_log_message("停止代理服务器超时，强制关闭", "WARNING")
-        else:
-            self.queue_log_message("代理服务器已成功停止", "INFO")
-
+        
         self.is_running = False
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
@@ -405,10 +411,23 @@ class ProxyGUI:
             self.proxy_thread.join(timeout=2)
         self.proxy_thread = None
 
+        # 确保所有相关的异步任务都被取消
+        self.cancel_all_tasks()
+
+    def cancel_all_tasks(self):
+        try:
+            loop = asyncio.get_event_loop()
+            tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+            [task.cancel() for task in tasks]
+            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+        except Exception as e:
+            self.queue_log_message(f"取消异步任务时发生错误: {str(e)}", "ERROR")
+
     def _run_proxy(self, args):
         try:
             self.proxy_server = proxy.create_server(args)
             if isinstance(self.proxy_server, ThreadingHTTPServer):
+                self.proxy_server.timeout = 1  # 设置超时时间为1秒
                 while not self.stop_event.is_set():
                     self.proxy_server.handle_request()
             elif isinstance(self.proxy_server, SocksProxy):
@@ -452,11 +471,37 @@ class ProxyGUI:
             self.proxy_thread.join(timeout=2)
         
         # 关闭所有可能的网络连接
-        for task in asyncio.all_tasks(asyncio.get_event_loop()):
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        tasks = asyncio.all_tasks(loop)
+        for task in tasks:
             task.cancel()
+        
+        if tasks:
+            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+        
+        loop.close()
         
         # 确保日志队列被处理
         self.process_log_queue()
+
+    def load_proxies_from_file(self):
+        proxy_file = 'proxies.json'
+        try:
+            with open(proxy_file, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and 'proxies' in data:
+                self.proxy_pool.proxies = data['proxies']
+            else:
+                self.proxy_pool.proxies = data  # 兼容旧格式
+            self.queue_log_message(f"从文件加载了 {len(self.proxy_pool.proxies)} 个代理", "INFO")
+            self.update_proxy_count()
+        except Exception as e:
+            self.queue_log_message(f"加载代理文件时发生错误: {str(e)}", "ERROR")
 
 def main():
     root = tk.Tk()
