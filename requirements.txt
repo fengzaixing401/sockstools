@@ -1,5 +1,7 @@
-requests
+requests>=2.25.1
 PySocks>=1.7.1
-aiohttp==3.8.1
-aiofiles
-urllib3
+aiohttp>=3.8.1
+aiofiles>=0.8.0
+urllib3>=1.26.5
+tkinter  # 通常作为 Python 标准库的一部分，但在某些系统上可能需要单独安装
+asyncio  # Python 3.4+ 标准库的一部分，通常不需要单独安装
